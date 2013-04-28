@@ -1,7 +1,7 @@
 # Flotten
 
 A F# implementation of the algorithm described in [In Search of an
-Understandable Consensus Algorithm][1].
+Understandable Consensus Algorithm][1]. Flotten is swedish for raft.
 
 To have a look at the implementation, look at [Raft.fs][2] which is the
 implementation file.
