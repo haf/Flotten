@@ -1,12 +1,32 @@
 # Flotten
 
 A F# implementation of the algorithm described in [In Search of an
-Understandable Consensus Algorithm][1]. Flotten is swedish for raft.
+Understandable Consensus Algorithm][1]. Flotten is swedish for raft. The paper
+is authored by Diego Ongaro and John Ousterhout from Stanford University.
 
 To have a look at the implementation, look at [Raft.fs][2] which is the
-implementation file.
+algorithm implementation file.
 
-Moving parts:
+## Description of the Algorithm (paper abstract)
+
+Raft is a consensus algorithm for managing a replicated log. It produces a result
+equivalent to Paxos, and it is as efficient as Paxos, but its structure is
+different from Paxos; this makes Raft more understandable than Paxos and also
+provides a better foundation for building practical systems. In order to
+enhance understandability, Raft separates the key elements of consensus, such as
+leader election and log replication, and it enforces a stronger degree of
+coherency to reduce the number of states that must be considered. Raft also
+includes a new mechanism for changing the cluster membership, which uses
+overlapping majorities to guarantee safety. Results from a user study
+demonstrate that Raft is easier for students to learn than Paxos.
+
+### Current Implementation Status
+
+Very raw. When the TODOs have been scrubbed it can be considered pre-alpha. I
+also plan to do some work to allow remote communication between actors as to
+make the whole thing more realistic.
+
+### Moving parts:
 
  * Each RaftActor, in Raft.fs
  * A single TimeoutService. Preferrably hosted on the same node as the
