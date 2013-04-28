@@ -26,6 +26,12 @@ Very raw. When the TODOs have been scrubbed it can be considered pre-alpha. I
 also plan to do some work to allow remote communication between actors as to
 make the whole thing more realistic.
 
+Large TODOs:
+
+ * The Log
+ * Complete AppendEntries for all states
+ * Complete leader state and all that the leader state means.
+
 ### Moving parts:
 
  * Each RaftActor, in Raft.fs
