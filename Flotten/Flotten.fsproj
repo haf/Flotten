@@ -55,6 +55,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Actors.fs" />
+    <Compile Include="Timeouts.fs" />
+    <Compile Include="Log.fs" />
     <Compile Include="Raft.fs" />
     <None Include="Script.fsx" />
     <None Include="packages.config" />

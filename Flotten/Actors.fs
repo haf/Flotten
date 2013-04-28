@@ -38,9 +38,9 @@ type QuorumJoinMsg<'TReply, 'TRes> =
 /// <param>fnHarvest does two things: verifies whether the current yield is enough by returning</param>
 /// <param>true as the first value in the tuple, if it is, and secondly projects some value from
 /// the aggregated state to be returned to the caller. This function is the reducer.</param>
-/// cluster is the actors to poll for results, the nodes mapped to.
-/// facMsg is the corresponding Async.PostAndAsyncReply -> buildMessage -> ... -- buildMessage
-/// parameter.
+/// <param>cluster is the actors to poll for results, the nodes mapped to.</param>
+/// <param>facMsg is the corresponding Async.PostAndAsyncReply -> buildMessage -> ... -- buildMessage
+/// parameter.</param>
 let yieldHarvest
     (fnYield   : 'TState -> 'TReply -> 'TState)
     (yieldZero : 'TState)

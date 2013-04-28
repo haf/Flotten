@@ -1,132 +1,31 @@
 ﻿module Flotten
 
-open NodaTime
-
-/// Small helper functions
-[<AutoOpen>]
-module Helpers =
-  /// helper function to write a string entry to the debug log.
-  let debug  = System.Diagnostics.Debug.WriteLine
-
-  /// get the current instant
-  let now () = Instant.FromDateTimeUtc(System.DateTime.UtcNow)
-
-  /// A logical clock, could possibly be replaced with a Interval Tree Clock
-  type Clock = bigint
-
-/// This module implments a timeout service
-module Timeouts =
-
-  open Actors
-  open FSharpx.Collections.Experimental
-
-  /// Internal state for the timeout service
-  type internal TSState =
-    { upcoming : BinomialHeap<WorkItem> }
-    static member Empty pid = { upcoming = BinomialHeap.empty(false (* ascending instants *)) }
-
-  /// Work Items for the timeout service
-  and [<CustomEquality; CustomComparison>] WorkItem =
-    { actor   : ActorRef
-    ; time    : Instant
-    ; message : obj }
-    override x.Equals(yobj) =
-      match yobj with
-      | :? WorkItem as y -> (x.time = y.time && x.actor.pid = y.actor.pid)
-      | _ -> false
-    override x.GetHashCode() = hash x.time
-    interface System.IComparable with
-      member x.CompareTo yobj =
-        match yobj with
-        | :? WorkItem as y -> compare x.time y.time // compare only on when should be sent
-        | _ -> invalidArg "yobj" "cannot compare values of different types"
-
-  /// Messages for TimeoutService
-  type TSMsg =
-    | Halt
-    | Schedule of WorkItem
-
-  /// TimeoutService that sends messages to actors wanting timeouts
-  let startTS pid =
-    let epsilon = 1 // milliseconds to wait for any message
-    Actor.Start <|
-      fun inbox ->
-        let myself = { pid = pid; send = (fun m -> inbox.Post(m :?> TSMsg)) }
-
-        /// in loop mode we're receiving scheduled timeouts
-        let rec loop state = async {
-          let! m = inbox.TryReceive epsilon
-          match m with
-          | Some(Schedule wi) -> return! loop { state with upcoming = state.upcoming |> BinomialHeap.insert wi }
-          | Some(Halt)        -> return ()
-          | None              -> return! chewOn state }
-
-        /// in chewing mode we're just popping things off the binomial heap
-        /// and executing the sending of the timeout
-        and chewOn state = async {
-          match state.upcoming.TryUncons() with
-          | Some ({ actor = { pid = pid; send = send }; time = time; message = msg }, upcoming')
-            when time <= now () ->
-            debug <| sprintf "timeout for pid %i, sending %A to it." pid msg
-            msg |> send
-            return! chewOn { state with upcoming = upcoming' }
-          | _    -> return! loop state
-          }
-
-        loop <| TSState.Empty(pid)
-
-module Types =
-
-  type Term = bigint
-
-// currently stubbed module for handling logging
-module Log =
-
-  open Types
-
-  // Each log entry has an integer index identifying its position in the log.
-  type Index = System.UInt32
-  type Command  = string
-  type LogInstance = obj
-
-  type LogEntry =
-    /// Each log entry has an integer index identifying its position in the log.
-    { position : Index
-    /// Each log entry stores a state machine command along with the term number when the entry was received by the leader 
-    ; command  : Command
-    /// The term numbers in log entries are used to detect inconsistencies between logs and to ensure the Raft safety property
-    /// as described in Section 5.4.
-    ; term     : Term }
-  
-  type LogDelta = LogEntry list
-  
-  let at (index : Index) (instance : LogInstance) = 
-    { position = index
-    ; command  = "noop"
-    ; term     = 1I } |> Some
-
-  let setAuthorative (delta : LogDelta) (instance : LogInstance) =
-    ()
-
 /// This module contains the Raft server implementation
 module RaftServer =
 
+  open NodaTime
   open Actors
   open Timeouts
-  open Types
   open Log
 
+  /// helper function to write a string entry to the debug log.
+  let private  debug  = System.Diagnostics.Debug.WriteLine
+  /// get the current instant
+  let private now () = Instant.FromDateTimeUtc(System.DateTime.UtcNow)
   /// Raft protocol options that each sever in the cluster starts with.
   type ProtoOpts =
     { electionTimeout : Duration }
 
-  /// Possible messages to send to a Consensus Actor.
+  /// Possible messages to send to a Raft server.
   type RaftMessage =
-    | Halt
+    /// Sent to the actor when the timeout service has a timeout
     | ElectionTimeout of Clock
+    /// The actor sends this message to itself from its outstanding
+    /// RequestVote calls that happen in parallel
+    | VoteConcluded of VoteResult
+    // these are the only (four) messages in the algorithm
     | RequestVote of VoteRequest * VoteReply AsyncReplyChannel
     | AppendEntries of AppendRequest * AppendReply AsyncReplyChannel
-    | VoteConcluded of VoteResult
 
   /// Request to do a vote
   and VoteRequest =
@@ -182,10 +81,12 @@ module RaftServer =
     /// The last log index written
     ; lastLogIndex : Log.Index
     /// The last log term seen/written
-    ; lastLogTerm  : Term }
+    ; lastLogTerm  : Term
+    /// ￼A Sequence of log entries. The index into this sequence is the index of the log entry
+    ; log          : LogInstance }
 
-    /// The empty CAState
-    static member Empty pid = 
+    /// The empty state
+    static member Empty pid log = 
       { term         = 0I
       ; pid          = pid
       ; cluster      = []
@@ -193,16 +94,19 @@ module RaftServer =
       ; votedFor     = None
       ; tsClock      = Clock.Zero
       ; lastLogIndex = Log.Index.MinValue
-      ; lastLogTerm  = Term.Zero }
+      ; lastLogTerm  = Term.Zero
+      ; log          = log }
 
   and Follower =
     { actorRef : ActorRef
     ; nextIndex : Log.Index }
 
   /// Raft Actor implementing the Raft protocol
-  let startRA pid (ts : MailboxProcessor<TSMsg>) (opts : ProtoOpts) =
+  let startRA pid (ts : MailboxProcessor<TSMsg>) (opts : ProtoOpts) log =
 
-    /// schedule message msg in time time to be sent to the actor.
+    /// Schedule message msg in time time to be sent to the actor.
+    /// Async to allow a different external service to be used at some
+    /// future point in time.
     let schedule actor time msg = async {
       do ts.Post <| Schedule { actor = actor; message = msg; time = time } }
 
@@ -216,7 +120,6 @@ module RaftServer =
       fun inbox ->
         let myself = { pid = pid; send = (fun m -> inbox.Post(m :?> RaftMessage)) }
         let schedule = schedule myself
-        let logInstance = obj ()
 
         let rec follower state = async {
           do! (ElectionTimeout state.tsClock) |> schedule (now () + opts.electionTimeout)
@@ -270,7 +173,7 @@ module RaftServer =
             let returnFailure () = replyChan.Reply { success = false; term = req.term }
             let state' = { state with tsClock = state.tsClock + 1I; term = req.term }
 
-            match logInstance |> Log.at req.prevLogIndex with
+            match state.log |> Log.at req.prevLogIndex with
             | None ->
               returnFailure ()
               return! follower state'
@@ -284,13 +187,11 @@ module RaftServer =
                 // 6. If existing entries conflict with new entries, delete all
                 //    existing entries starting with first conflicting entry(§5.3)
                 // 7. Append any new entries not already in the log 
-                logInstance |> Log.setAuthorative req.entries
+                state.log |> Log.setAuthorative req.entries
                 // 8. Apply newly committed entries to state machine (§5.3)
                 // TODO
                 replyChan.Reply { success = true; term = req.term }
                 return! follower state'
-          
-          | Halt -> return () // ?
           }
 
         and candidate_start state = async {
@@ -312,12 +213,12 @@ module RaftServer =
             |> (fun grouping -> grouping.Add (msg.voteGranted, msg :: msgs))
 
           let quorumForYesOrNo quorum grouping = // assume I send myself a req to vote
-            let forYes = grouping |> Map.find true
-            let forNo  = grouping |> Map.find false
-            if (forYes |> List.length) >= quorum then
-              Some (true, forYes)
-            elif (forNo |> List.length) >= quorum then 
-              Some (false, forNo)
+            let yays = grouping |> Map.find true
+            let nays  = grouping |> Map.find false
+            if (yays |> List.length) >= quorum then
+              Some (true, yays)
+            elif (nays |> List.length) >= quorum then 
+              Some (false, nays)
             else
               None
 
@@ -384,7 +285,7 @@ module RaftServer =
         and leader state = async {
           return () }
 
-        follower <| MyState.Empty pid
+        follower <| MyState.Empty pid log
 
 
 (* optimisations:
