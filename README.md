@@ -33,6 +33,7 @@ Large TODOs:
  * Complete leader state and all that the leader state means.
  * Supervisor
  * Application entry point
+ * Tests, tests, tests.
 
 Comparison with [Jakob's implementation][4]:
 
