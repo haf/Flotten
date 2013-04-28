@@ -38,7 +38,7 @@ Large TODOs:
  * Reconfiguration
  * Tests, tests, tests.
 
-Comparison with [Jakob's implementation][4]:
+### Comparison with [Jakob's implementation][4]:
 
  * Separate TimeoutService (as opposed to timer), making timeouts explicit
    and using a logical clock to discard invalid timeout entries.
@@ -52,6 +52,13 @@ collection of yays and nays - only enough to settle the vote.
    code but as an atom in the erlang implementation
  * The Erlang implementation implements RPC primitives, I haven't handled things
    such as message duplication, sequencing (will do both on Actor level) yet.
+
+Since I'm using a logical clock to keep track of what timeout notifications to
+ignore, it might be a good idea to implement the pid/ActorRef as a core feature
+of the extended actor library, and then let each receive, fork, join, send and
+internal event update the clock component and having forks and the creation of
+new actors create new ids. See the paper on [Interval Tree Clocks][6] and my
+[initial hacks][7] at implementing them.
 
 ### Moving parts:
 
@@ -87,3 +94,5 @@ THE SOFTWARE.
  [3]: https://github.com/haf/Flotten/blob/master/Flotten/Actors.fs#L44
  [4]: https://github.com/cannedprimates/huckleberry
  [5]: http://raftuserstudy.s3-website-us-west-1.amazonaws.com/proof.pdf
+ [6]: http://gsd.di.uminho.pt/teaching/misd/2010/sm/itc.pdf
+ [7]: https://github.com/haf/Interval-Tree-Clocks/tree/fsharp
