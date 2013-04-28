@@ -32,6 +32,8 @@ Large TODOs:
  * Complete AppendEntries for all states
  * Complete leader state and all that the leader state means.
 
+Compare implementation with [Jakob][4].
+
 ### Moving parts:
 
  * Each RaftActor, in Raft.fs
@@ -64,3 +66,4 @@ THE SOFTWARE.
  [1]: https://ramcloud.stanford.edu/wiki/download/attachments/11370504/raft.pdf
  [2]: https://github.com/haf/Flotten/blob/master/Flotten/Raft.fs
  [3]: https://github.com/haf/Flotten/blob/master/Flotten/Actors.fs#L44
+ [4]: https://github.com/cannedprimates/huckleberry
