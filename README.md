@@ -2,10 +2,12 @@
 
 A F# implementation of the algorithm described in [In Search of an
 Understandable Consensus Algorithm][1]. Flotten is swedish for raft. The paper
-is authored by Diego Ongaro and John Ousterhout from Stanford University.
+is authored by Diego Ongaro and John Ousterhout from Stanford University. The
+[proof][5] is being used to validate my implementation.
 
 To have a look at the implementation, look at [Raft.fs][2] which is the
-algorithm implementation file.
+algorithm implementation file. Comments abound; many searchable in the paper to
+find the reason for a certain piece of code.
 
 ## Description of the Algorithm (paper abstract)
 
@@ -31,8 +33,9 @@ Large TODOs:
  * The Log
  * Complete AppendEntries for all states
  * Complete leader state and all that the leader state means.
- * Supervisor
+ * Supervisor actor
  * Application entry point
+ * Reconfiguration
  * Tests, tests, tests.
 
 Comparison with [Jakob's implementation][4]:
@@ -42,6 +45,13 @@ Comparison with [Jakob's implementation][4]:
  * Erlang implementation stores RPCs in dictionary explicitly,
    I do it implicitly in parallel.
  * I should move my voting out to a common pure function
+ * My vote count is done with a separate yield-harvest actor that acts in a
+   yield-harves fasion. The yield is the grouping function and the harvest the
+collection of yays and nays - only enough to settle the vote.
+ * The state is encoded as a mutually recursive asynchronous function in my F#
+   code but as an atom in the erlang implementation
+ * The Erlang implementation implements RPC primitives, I haven't handled things
+   such as message duplication, sequencing (will do both on Actor level) yet.
 
 ### Moving parts:
 
@@ -76,3 +86,4 @@ THE SOFTWARE.
  [2]: https://github.com/haf/Flotten/blob/master/Flotten/Raft.fs
  [3]: https://github.com/haf/Flotten/blob/master/Flotten/Actors.fs#L44
  [4]: https://github.com/cannedprimates/huckleberry
+ [5]: http://raftuserstudy.s3-website-us-west-1.amazonaws.com/proof.pdf
