@@ -36,7 +36,8 @@ Large TODOs:
 
 Comparison with [Jakob's implementation][4]:
 
- * Separate TimeoutService (as opposed to timer)
+ * Separate TimeoutService (as opposed to timer), making timeouts explicit
+   and using a logical clock to discard invalid timeout entries.
  * Erlang implementation stores RPCs in dictionary explicitly,
    I do it implicitly in parallel.
  * I should move my voting out to a common pure function
