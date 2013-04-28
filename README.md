@@ -31,8 +31,15 @@ Large TODOs:
  * The Log
  * Complete AppendEntries for all states
  * Complete leader state and all that the leader state means.
+ * Supervisor
+ * Application entry point
 
-Compare implementation with [Jakob][4].
+Comparison with [Jakob's implementation][4]:
+
+ * Separate TimeoutService (as opposed to timer)
+ * Erlang implementation stores RPCs in dictionary explicitly,
+   I do it implicitly in parallel.
+ * I should move my voting out to a common pure function
 
 ### Moving parts:
 
