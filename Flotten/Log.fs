@@ -32,3 +32,10 @@ let at (index : Index) (instance : LogInstance) =
 
 let setAuthorative (delta : LogDelta) (instance : LogInstance) =
   ()
+
+let append (cmd : Command) (t : Term) (l : LogInstance) =
+  { l with log = { position = l.log.Length |> uint32
+                 ; command = cmd
+                 ; term    = t
+                 } :: l.log
+           ; commitIndex = l.commitIndex + 1u }

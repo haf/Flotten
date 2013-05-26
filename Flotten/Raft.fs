@@ -26,6 +26,7 @@ module RaftServer =
     // these are the only (four) messages in the algorithm
     | RequestVote of VoteRequest * VoteReply AsyncReplyChannel
     | AppendEntries of AppendRequest * AppendReply AsyncReplyChannel
+    | WriteValue of string
 
   /// Request to do a vote
   and VoteRequest =
@@ -60,19 +61,21 @@ module RaftServer =
     { term    : Term
     ; success : bool }
 
+  // TODO: followers needed? Just use cluster?
+  // TODO: nextIndex variable needed?
+
   /// Internal state for each Raft actor
   type internal MyState =
     /// Each server stores a current term number, which increases monotonically over time.
-    { term      : Term
+    { term         : Term
     /// The process identifier is used to uniquely identify the actor.
-    ; pid       : Pid
+    ; pid          : Pid
     /// The cluster is a list of all the other Raft servers.
-    ; cluster   : (Pid * Actor<RaftMessage>) list
+    ; cluster      : (Pid * Actor<RaftMessage>) list
     /// A list of all followers of myself
-    ; followers : Follower list
+    ; followers    : (Pid * Actor<RaftMessage>) list
     /// Who I voted for last
-    ; votedFor  : ActorRef option
-    /// TODO: update on send/receive (include in actor?)
+    ; votedFor     : ActorRef option
     /// This is my own addition to the mix, a local clock that
     /// allows me to keep track of whether I should ignore a scheduled
     /// timeout (if it's stale the clock of its message will be less than
@@ -101,6 +104,15 @@ module RaftServer =
     { actorRef : ActorRef
     ; nextIndex : Log.Index }
 
+  type AppendRequest with
+    static member internal EmptyFrom myself (state : MyState) =
+      { commitIndex = state.lastLogIndex + 1u
+      ; entries = []
+      ; leaderId = myself
+      ; prevLogIndex = state.lastLogIndex
+      ; prevLogTerm = state.lastLogTerm
+      ; term = state.term }
+
   /// Raft Actor implementing the Raft protocol
   let startRA pid (ts : MailboxProcessor<TSMsg>) (opts : ProtoOpts) log =
 
@@ -126,6 +138,7 @@ module RaftServer =
 
           let! msg = inbox.Receive ()
           match msg with
+          | WriteValue v -> return! follower state
           /// To begin an election, a follower increments its current term and transitions to candidate state.
           /// Convert to candidate if election timeout elapses without either:
           /// * Receiving valid AppendEntries RPC, or
@@ -243,6 +256,7 @@ module RaftServer =
           
           let! msg = inbox.Receive ()
           match msg with
+          | WriteValue v -> return! follower state
           // While waiting for votes, a candidate may receive an AppendEntries RPC from another server claiming 
           // to be leader. If the leader’s term (included in its RPC) is at least
           // as large as the candidate’s current term, then the candidate recognizes the leader as legitimate and 
@@ -262,7 +276,7 @@ module RaftServer =
 
           | VoteConcluded { wasPassed = true; results = r }
               when r |> forThisTerm state.term ->
-            return! leader { state with tsClock = state.tsClock + 1I }
+            return! leader { state with tsClock = state.tsClock + 1I; followers = state.cluster }
 
           // vote for myself now that I got opportunity
           | RequestVote (req, replyChan)
@@ -283,7 +297,33 @@ module RaftServer =
           }
 
         and leader state = async {
-          return () }
+
+          let nextIndex = state.lastLogIndex + 1u
+          let emptyAppend = AppendRequest.EmptyFrom myself state
+
+          let! appendRes =
+            state.followers
+            |> List.map (fun (_, f) -> f.PostAndAsyncReply(fun chan -> AppendEntries(emptyAppend, chan)))
+            |> Async.Parallel
+
+          // If AppendEntries fails because of log inconsistency,
+          // decrement nextIndex and retry (§5.3)
+             
+          // TODO: •! Whenever last log index ! nextIndex for a follower, send
+          // AppendEntries RPC with log entries starting at nextIndex,
+          // update nextIndex if successful (§5.3)
+
+          // TODO: Accept commands from clients, append new entries to local log (§5.3)
+
+          // TODO: write state before any RPC
+
+          let! msg = inbox.Receive ()
+          match msg with
+          | ElectionTimeout clock -> return! leader state
+          | VoteConcluded result -> return! leader state
+          | RequestVote (request, replyChan) -> return! leader state
+          | AppendEntries (request, replyChan) -> return! leader state
+          | WriteValue value -> return! leader { state with log = log |> Log.append value state.term } }
 
         follower <| MyState.Empty pid log
 
