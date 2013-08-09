@@ -85,7 +85,7 @@ module RaftServer =
     ; lastLogIndex : Log.Index
     /// The last log term seen/written
     ; lastLogTerm  : Term
-    /// ￼A Sequence of log entries. The index into this sequence is the index of the log entry
+    /// A Sequence of log entries. The index into this sequence is the index of the log entry
     ; log          : LogInstance }
 
     /// The empty state
