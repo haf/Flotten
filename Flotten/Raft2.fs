@@ -16,13 +16,16 @@ module Actors =
   /// A reference id for the actor
   type ActorId = uint32
 
+  /// A message id type
+  type MessageId = Guid
+
   type Actor =
     abstract Id   : ActorId
     abstract Post : obj -> Async<unit>
 
   /// Messaging infrastructure
   type MessageContext =
-    abstract MessageId : Guid
+    abstract MessageId : MessageId
     abstract Source    : Actor
 
   type Inbox<'a> =
@@ -41,7 +44,6 @@ module Actors =
     async {
       for a in (actors : Actor list) do
         do! a <!- message }
-
 
 open Actors
 
@@ -66,7 +68,7 @@ type Timeout(data : obj) =
   member x.Data = data
 
 /// Invoked by candidates to gather votes (§5.2).
-type RequestVote(term : Term, candidateId : ActorId) =
+type RequestVoteRequest(term : Term, candidateId : ActorId) =
   member x.Term = term
   member x.CandidateId = candidateId
 
@@ -75,7 +77,7 @@ type RequestVoteReply(term : Term, voteGranted : bool) =
   member x.VoteGranted = voteGranted
 
 /// Invoked by leader periodically to prevent other servers from starting new elections (§5.2).
-type Heartbeat(term : Term, leaderId : ActorId) =
+type HeartbeatRequest(term : Term, leaderId : ActorId) =
   member x.Term = term
   member x.LeaderId = leaderId
 
@@ -83,10 +85,10 @@ type HeartbeatReply(term : Term) =
   member x.Term = term
 
 /// Invoked by leader to replicate log entries (§5.3); extension of Heartbeat RPC.
-type AppendEntries(term : Term, leaderId : ActorId,
-                   prevLogIndex : Log.Index, prevLogTerm : Term,
-                   entries : Log.LogEntry list, commitIndex : Log.Index) =
-  member x.Heartbeat    = Heartbeat(term, leaderId)
+type AppendEntriesRequest(term : Term, leaderId : ActorId,
+                          prevLogIndex : Log.Index, prevLogTerm : Term,
+                          entries : Log.LogEntry list, commitIndex : Log.Index) =
+  member x.Heartbeat    = HeartbeatRequest(term, leaderId)
   member x.PrevLogIndex = prevLogIndex
   member x.PrevLogTerm  = prevLogTerm
   member x.Entries      = entries
@@ -97,7 +99,7 @@ type AppendEntriesReply(term : Term, success : bool) =
   member x.Success          = success
 
 /// Invoked by clients to modify the replicated state (§7.1).
-type ClientRequest(seqNo : uint32, command : Command) =
+type ClientRequestRequest(seqNo : uint32, command : Command) =
   member x.SeqNo   = seqNo
   member x.Command = command
 
@@ -118,10 +120,10 @@ type Election =
 
 /// All sorts of RPCs that Raft needs to be able to handle
 type RPCs =
-  | RequestVote of RequestVote
-  | Heartbeat of Heartbeat
-  | AppendEntries of AppendEntries
-  | ClientRequest of ClientRequest
+  | RequestVote of RequestVoteRequest
+  | Heartbeat of HeartbeatRequest
+  | AppendEntries of AppendEntriesRequest
+  | ClientRequest of ClientRequestRequest
 
 type Replies =
   | RequestVoteRepl of RequestVoteReply
@@ -143,6 +145,8 @@ type PersistentState =
 
 /// Candidates and leaders keep the following volatile state for each other server:
 type PeerState =
+  Map<ActorId, PeerStateData>
+and PeerStateData =
   { voteResponded  : bool
   ; voteGranted    : bool
   ; nextIndex      : Log.Index
@@ -156,15 +160,13 @@ type PeerState =
 /// Configuration that each node starts with
 type Config =
   { id    : ActorId
-  ; peers : ActorId list }
+  ; peers : Actor list }
 
 /// Highly volatile state of outstanding RPC requests
 type RPCState =
-  { votes  : Map<Guid, RequestVoteReply>
-  ; config : Config }
-  static member Create config =
-    { votes  = Map.empty
-    ; config = config }
+  { votes  : Map<MessageId, RequestVoteReply> }
+  static member Empty =
+    { votes  = Map.empty }
 
 /// State kept by the raft actor/node
 type State = PersistentState * RPCState * Option<PeerState>
@@ -177,10 +179,25 @@ module RaftProtocol =
       do! persist p_state
       do! messageContext.Source <!- reply }
 
-  /// transitions the state to the next state (increments the local time)
-  let resetElection state = 
+  let pub_rpc peers p_state message =
+    async {
+      do! persist p_state
+      do! peers <!! message }
+
+  /// Transitions the state to the next state (increments the local time)
+  let reset_election state =
     let p, a, b = state
     { p with timeoutTerm = p.timeoutTerm + 1I }, a, b
+
+  /// Sets the next term as the state
+  let next_term state =
+    let p, a, b = state
+    { p with currentTerm = p.currentTerm + 1u }, a, b
+
+  /// Sets the votedFor to self and initialises the Peer State.
+  let vote_self selfId state =
+    let p, rpc, shared = state
+    { p with votedFor = Some(selfId) }, rpc, Some(Map.empty)
 
 open RaftProtocol
 
@@ -188,7 +205,7 @@ let spawn (inbox : Inbox<Accepted>) config =
 
   let rec initialise () =
     async {
-      let state = PersistentState.Empty, (RPCState.Create config), None
+      let state = PersistentState.Empty, RPCState.Empty, None
       return! follower state }
 
   and follower (state : State) =
@@ -209,7 +226,7 @@ let spawn (inbox : Inbox<Accepted>) config =
             return! follower state
           else
             let reply = RequestVoteReply(rv.Term, p_state.votedFor.IsNone || rv.CandidateId = p_state.votedFor.Value)
-            let p_state', _, _ as state' = resetElection state
+            let p_state', _, _ as state' = reset_election state
             do! reply |> respond context p_state'
             return! follower state'
         | Heartbeat hb -> return ()
@@ -219,7 +236,7 @@ let spawn (inbox : Inbox<Accepted>) config =
         when election.term = p_state.currentTerm
         &&   sentTime      = p_state.timeoutTerm ->
         // since election timeout expired, become candidate
-        return! initialise_candidate(resetElection(state))
+        return! initialise_candidate <| reset_election state
       | ElectionTimeout(election, sentTime) ->
         // since sentTime != timeoutTerm or the term != currentTerm; has had no RPC nor vote granted by follower
         return! follower state
@@ -230,7 +247,10 @@ let spawn (inbox : Inbox<Accepted>) config =
 
   and initialise_candidate state =
     async {
-      return! candidate state
+      let p_state', _, _ as state' = next_term state |> reset_election |> vote_self config.id
+      let reqVote = RequestVoteRequest(p_state'.currentTerm, config.id)
+      do! reqVote |> pub_rpc config.peers p_state'
+      return! candidate state'
       }
 
   and candidate state =
