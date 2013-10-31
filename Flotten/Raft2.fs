@@ -27,23 +27,33 @@ module Actors =
   type MessageContext =
     abstract MessageId : MessageId
     abstract Source    : Actor
+    abstract ReplyTo   : MessageId option
+
+  type SendContext =
+    abstract MessageId : MessageId
 
   type Inbox<'a> =
     abstract Receive : unit -> Async<'a * MessageContext>
+
+  let uuid () : MessageId = System.Guid.NewGuid()
 
   let find actorId : Actor =
     { new Actor with
         member x.Id     = 0u
         member x.Post o = async { return () } }
 
+  let post actor messageId message =
+    async { do! (actor : Actor).Post message }
+
   let (<!-) actor message =
     async {
-      do! (actor : Actor).Post message }
+      let id = uuid ()
+      do! post actor id message
+      return { new SendContext with member x.MessageId = id } }
 
   let (<!!) actors message =
     async {
-      for a in (actors : Actor list) do
-        do! a <!- message }
+      return! actors |> List.map (fun a -> a <!- message) |> Async.Parallel }
 
 open Actors
 
@@ -96,7 +106,7 @@ type AppendEntriesRequest(term : Term, leaderId : ActorId,
 
 type AppendEntriesReply(term : Term, success : bool) =
   inherit HeartbeatReply(term)
-  member x.Success          = success
+  member x.Success = success
 
 /// Invoked by clients to modify the replicated state (§7.1).
 type ClientRequestRequest(seqNo : uint32, command : Command) =
@@ -162,27 +172,63 @@ type Config =
   { id    : ActorId
   ; peers : Actor list }
 
-/// Highly volatile state of outstanding RPC requests
+/// Highly volatile state of outstanding RPC requests; RequestId (MessageId)
+/// to Reply.
 type RPCState =
-  { votes  : Map<MessageId, RequestVoteReply> }
+  { replies  : Map<MessageId, bool>
+  ; voteReqs : Set<MessageId> }
   static member Empty =
-    { votes  = Map.empty }
+    { replies  = Map.empty
+    ; voteReqs = Set.empty }
 
 /// State kept by the raft actor/node
 type State = PersistentState * RPCState * Option<PeerState>
 
+module Logging =
+  let log = printfn
+
 module RaftProtocol =
+  open Logging
+
+  type StateOption =
+    | Follower
+    | Candidate
+    | Leader
+
+  type States =
+    { follower  : State -> Async<unit>
+    ; candidate : State -> Async<unit>
+    ; leader    : State -> Async<unit>
+    ; current   : StateOption }
+  with
+    member x.ContinueWithSame state = async {
+      match x.current with
+      | Follower -> return! x.follower state
+      | Candidate -> return! x.candidate state
+      | Leader    -> return! x.leader state }
+    static member AsFollower(f, b_c, l) =
+      { follower = f; candidate = b_c; leader = l; current = Follower }
+    static member AsCandidate(f, c, l) =
+      { follower = f; candidate = c; leader = l; current = Candidate }
+    static member AsLeader(f, c, l) =
+      { follower = f; candidate = c; leader = l; current = Leader }
 
   let respond (messageContext : MessageContext) p_state reply =
     async {
       /// Each server persists the persistent state before responding to RPCs:
       do! persist p_state
-      do! messageContext.Source <!- reply }
+      let! ctx = messageContext.Source <!- reply
+      return ctx }
 
-  let pub_rpc peers p_state message =
+  /// persists persistent state, publishes the message and adds the outstanding
+  /// RPCs to the returned value of type RPCState.
+  let pub_rpc peers p_state rpc_state message =
+    let add_rpc acc (ctx : SendContext) =
+      { acc with replies = acc.replies.Add(ctx.MessageId, false) } // TODO: always adds to votes
     async {
       do! persist p_state
-      do! peers <!! message }
+      let! send_contexts = peers <!! message
+      return send_contexts |> List.ofArray |> List.fold add_rpc rpc_state }
 
   /// Transitions the state to the next state (increments the local time)
   let reset_election state =
@@ -199,17 +245,40 @@ module RaftProtocol =
     let p, rpc, shared = state
     { p with votedFor = Some(selfId) }, rpc, Some(Map.empty)
 
+  /// The message received doesn't fit the state the server/actor is in
+  let invalid_in_state state_name msg =
+    log "state %s doesn't accept %A" state_name msg
+
+  /// The message wasn't current anymore, discarding.
+  let stale_msg state_name msg =
+    log "state %s received stale message %A" state_name msg
+
+  let handle_heartbeat_msg (hb : HeartbeatRequest) state context
+    (states : States) = async {
+    let p_state, rpc_state, _ = state
+    if hb.Term < p_state.currentTerm then
+      let reply = HeartbeatReply(p_state.currentTerm)
+      let! _ = reply |> respond context p_state
+      return! states.ContinueWithSame state // same state, same election
+    elif hb.Term > p_state.currentTerm then
+      let state' = next_term state
+      return! states.follower (reset_election state)
+    else
+      // if someone send a HB at current term
+      return! states.follower (reset_election state) }
+
+open Logging
 open RaftProtocol
 
 let spawn (inbox : Inbox<Accepted>) config =
 
-  let rec initialise () =
-    async {
-      let state = PersistentState.Empty, RPCState.Empty, None
-      return! follower state }
+  let rec initialise () = async {
+    let state = PersistentState.Empty, RPCState.Empty, None
+    return! follower state }
 
   and follower (state : State) =
     let p_state, rpc_state, _ = state
+    let states = States.AsFollower(follower, become_candidate, leader)
     async {
       let! msg, context = inbox.Receive()
       match msg with
@@ -217,50 +286,99 @@ let spawn (inbox : Inbox<Accepted>) config =
         match rpc with
         | RequestVote rv ->
           if rv.Term < p_state.currentTerm then
-            do! RequestVoteReply(p_state.currentTerm, false) 
-              |> respond context p_state
+            let! _ = RequestVoteReply(p_state.currentTerm, false) 
+                     |> respond context p_state
             return! follower state
           elif rv.Term > p_state.currentTerm then
-            do! RequestVoteReply(rv.Term, true)
-              |> respond context p_state
+            let! _ = RequestVoteReply(rv.Term, true)
+                     |> respond context p_state
             return! follower state
           else
             let reply = RequestVoteReply(rv.Term, p_state.votedFor.IsNone || rv.CandidateId = p_state.votedFor.Value)
             let p_state', _, _ as state' = reset_election state
-            do! reply |> respond context p_state'
+            let! _ = reply |> respond context p_state'
             return! follower state'
-        | Heartbeat hb -> return ()
-        | AppendEntries ae -> return ()
-        | ClientRequest cr -> return ()
+        | Heartbeat hb ->
+          return! handle_heartbeat_msg hb state context states
+        | AppendEntries ae ->
+          // Todo
+          return! follower (reset_election state)
+        | ClientRequest cr ->
+          cr |> invalid_in_state "follower"
+          return! follower state
       | ElectionTimeout(election, sentTime)
         when election.term = p_state.currentTerm
         &&   sentTime      = p_state.timeoutTerm ->
         // since election timeout expired, become candidate
-        return! initialise_candidate <| reset_election state
+        return! become_candidate (reset_election state)
       | ElectionTimeout(election, sentTime) ->
         // since sentTime != timeoutTerm or the term != currentTerm; has had no RPC nor vote granted by follower
         return! follower state
       | Reply t ->
-        
+        // ignore replies in this state
         return! follower state
       }
 
-  and initialise_candidate state =
+  and become_candidate state =
     async {
-      let p_state', _, _ as state' = next_term state |> reset_election |> vote_self config.id
-      let reqVote = RequestVoteRequest(p_state'.currentTerm, config.id)
-      do! reqVote |> pub_rpc config.peers p_state'
-      return! candidate state'
+      let p_state', rpc_state, peer_state' = next_term state |> reset_election |> vote_self config.id
+      let msg_req_vote = RequestVoteRequest(p_state'.currentTerm, config.id)
+      let! rpc_state' = msg_req_vote |> pub_rpc config.peers p_state' rpc_state
+      return! candidate (p_state', rpc_state', peer_state')
       }
 
   and candidate state =
+    let p_state, rpc_state, _ = state
+    let states = States.AsCandidate(follower, candidate, leader)
     async {
-      return! leader state
+      let! msg, context = inbox.Receive()
+      match msg with
+      | RPC rpc ->
+        match rpc with
+        | RequestVote rv ->
+          return ()
+        | Heartbeat hb ->
+          return! handle_heartbeat_msg hb state context states
+        | AppendEntries ae ->
+          return ()
+        | ClientRequest cr ->
+          return ()
+      | ElectionTimeout(election, sentTime) ->
+        return ()
+      | Reply t ->
+        let rpc_id = context.ReplyTo.Value // always has value on reply
+        match t with
+        | RequestVoteRepl r ->
+//          if rpc_state.voteReqs.Contains rpc_id then
+//            
+          return ()
+        | HeartbeatRepl h ->
+          return ()
+        | AppendEntriesRepl a ->
+          return ()
+        | ClientRequestRepl cr ->
+          // ignore client requests when in candidate state
+          return! candidate state
       }
 
   and leader state =
     async {
-      return! follower state
+      let! msg, context = inbox.Receive()
+      match msg with
+      | RPC rpc ->
+        match rpc with
+        | RequestVote rv ->
+          return ()
+        | Heartbeat hb ->
+          return ()
+        | AppendEntries ae ->
+          return ()
+        | ClientRequest cr ->
+          return ()
+      | ElectionTimeout(election, sentTime) ->
+        return ()
+      | Reply t ->
+        return ()
       }
 
   initialise ()
